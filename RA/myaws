@@ -1,0 +1,249 @@
+#!/usr/bin/env bash
+
+# bash 3.2 compaitable
+
+# Notice:
+# - Might need to check $IFS, bump into probelm while testing on zsh
+
+# Conventions: 
+# - EBS volume attach to /dev/sdf as first option available from EC2 console, and display as block device: nvme1n1
+
+# in-script AWS configuration for aws --no-cli-pager --output=json
+export AWS_DEFAULT_OUTPUT="json"
+export AWS_PAGER=""
+
+# Common variables
+RESOURCE_PREFIX="ra"
+
+# - EBS volume settings
+RA_PROFILE='small'
+volume_availability_zone="ap-southeast-2a"
+case $RA_PROFILE in
+  rt)
+    # - for Release Testing
+    volume_type="gp3"
+    volume_size=1000
+    volume_iops=3000
+    volume_throughput=128
+      ;;
+  small)
+    # - for Small Profile
+    volume_type="gp3"
+    volume_size=3000
+    volume_iops=3000
+    volume_throughput=250
+  ;;
+  big)
+    # - for Big Profile
+    volume_type="gp3"
+    volume_size=10000
+    volume_iops=16000
+    volume_throughput=1000
+  ;;
+esac
+
+# Helper functions
+
+help() { compgen -A function; }
+
+prerequisite-check() {
+  # check the additional commands being used in this script
+  for command in aws jq rancher
+  do
+    which -s $command || ( echo "There is no command: $command" && exit 1 )
+  done
+
+  test ! -f $HOME/.krew/bin/kubectl-node_shell && echo "Also krew plugin node-shell is needed for auto-mount.exp" && exit 1 || echo "Seems good to go."
+
+}
+
+env-check() { declare -p|less ;}
+
+wait-for-cluster() {
+
+  [ $# -lt 1 ] && ( echo "Please give us a number!" && exit 1 ) #  || exit 1 # Need to rewrite the logic for the condition check..
+
+  while [ "$(kubectl get nodes|grep worker|grep Ready|wc -l|tr -d ' ')" -lt $@ ]
+  do
+    echo "$(kubectl get nodes|grep worker|grep Ready|wc -l|tr -d ' ') ready.. waiting..." && sleep 1
+  done
+
+  echo "Done waiting.. nodes are proably ready for work..."
+}
+
+
+# Functions
+# - basic structure: action-name() { delcare-local-variables; arguments-pre-check; the-command|string-processing|sort|uniq|other-processing-for-array; }
+
+list-instances-in-all-regions() {
+  # https://github.com/aws/aws-cli/issues/1777#issuecomment-349815681
+  for region in `aws ec2 describe-regions --output text | cut -f3`
+  do
+       echo -e "\nListing Instances in region:'$region'..."
+       aws ec2 describe-instances --region $region | jq '.Reservations[] | ( .Instances[] | {state: .State.Name, name: .KeyName, Tag_Name: .Tags[].Value,type: .InstanceType, key: .KeyName})'
+  done
+}
+
+list-instances() {
+  aws ec2 describe-instances|jq --arg word "$RESOURCE_PREFIX" -r '.Reservations[].Instances[]|select(.State.Name=="running")| select(.KeyName|contains($word)) |[."InstanceId", ."KeyName"]|@tsv'
+}
+
+list-volumes() {
+  # print volumes with name tag
+  aws ec2 describe-volumes|jq -r '.Volumes[]|[.VolumeId, (.Tags[]?| select(.Key=="Name")| .Value), .Attachments[].InstanceId]|@tsv'
+}
+
+create-volumes() {
+  local instances=( $(list-instances|grep worker|cut -f1|tr "\n" " ") )
+  local index=${#instances[@]}
+
+  for i in $(eval echo "{1..$index}")
+  do
+    aws ec2 create-volume --volume-type $volume_type --size $volume_size --iops $volume_iops  --throughput $volume_throughput --availability-zone $volume_availability_zone \
+      --tag-specifications 'ResourceType=volume,Tags=[{Key=Name,Value=Volume-'"$i"'},{Key=longhorn,Value=qa}]' 
+  done
+}
+
+
+create-and-attach-new-volumes() {
+
+  # TODO: not finish yet
+  
+  local instances=$(list-instances|grep worker|wc -l|tr -d ' ')
+  local created_Volumes=$(list-volumes|grep Volume|wc -l|tr -d ' ' )
+
+  local volume_count_begin=$(( created_Volumes + 1 ))
+
+  for i in $(eval echo "{$volume_count_begin..$instances}")
+  do
+    aws ec2 create-volume --volume-type $volume_type --size $volume_size --iops $volume_iops  --throughput $volume_throughput --availability-zone $volume_availability_zone \
+      --tag-specifications 'ResourceType=volume,Tags=[{Key=Name,Value=Volume-'"$i"'},{Key=longhorn,Value=qa}]' 
+  done
+
+  # all volumes does not have instnace attached to
+  local new_volumes=( $(list-volumes|grep Volume|grep -v "i-"|tr "\n" " ") )
+
+  # all worker instances
+  #   myaws list-instances|grep worker|cut -f1
+  # all wokrer instances with Volumes attached
+  #   myaws list-volumes|cut -f3|grep .
+  # comm -23 <(myaws list-instances|grep worker|cut -f1|sort) <(myaws list-volumes|cut -f3|grep .|sort)| tr "\n" " " 
+  local new_instances=( $( comm -23 <(list-instances|grep worker|cut -f1|sort) <(list-volumes|cut -f3|grep .|sort)| tr "\n" " " ) )
+
+  local index=$((instances - created_Volumes))
+  let index-=1
+
+  for j in $(eval echo "{0..$index}")
+  do
+    attach-1-volume ${new_volumes[$j]} ${new_instances[$j]}
+  done
+}
+
+
+create-1-volume() {
+  local volumes=( $(list-volumes|grep Volume|cut -f1|tr "\n" " ") )
+  local index=${#volumes[@]}
+  
+  let index+=1
+  local number="$index"
+
+  aws ec2 create-volume --volume-type $volume_type --size $volume_size --iops $volume_iops  --throughput $volume_throughput --availability-zone $volume_availability_zone  \
+    --tag-specifications 'ResourceType=volume,Tags=[{Key=Name,Value=Volume-'"$number"'},{Key=longhorn,Value=qa}]' 
+}
+
+attach-1-volume() {
+  [ $# -lt 1 ] && ( echo "Please enter volume-id instance-id" && exit 1 )
+  aws ec2 attach-volume --volume-id $1 --instance-id $2 --device /dev/sdf
+}
+
+attach-volumes() {
+  local instances=( $(list-instances|grep worker|cut -f1|sort|tr "\n" " ") )
+  local volumes=(  $(list-volumes|grep Volume|cut -f1|sort|tr "\n" " ") )
+
+  [ ${#instances[@]} -eq ${#volumes[@]} ] || (echo "Volume and intance numbers are not matching, please check." && exit 1) || exit 1
+
+  local index=${#volumes[@]}
+  let index-=1
+
+  for i in $(eval echo "{0..$index}")
+  do
+    aws ec2 attach-volume --volume-id ${volumes[$i]} --instance-id ${instances[$i]} --device /dev/sdf
+  done
+}
+
+delete-1-volume() {
+  [ $# -lt 1 ] && ( echo "Please enter volume-id" && exit 1 )
+  aws ec2 detach-volume --volume-id $@
+  aws ec2 delete-volume --volume-id $@
+}
+
+delete-volumes() {
+  local volumes=( $(list-volumes|grep Volume|cut -f1|tr "\n" " ") )
+  local index=${#volumes[@]}
+  let index-=1
+
+  #   [ ${#index[@]} -lt 0 ] && echo "No Volume!"
+
+  # delete unattached volumes: myaws list-volumes|grep -v "i-"|cut -f1|xargs -I{} myaws delete-1-volume {}
+
+  for i in $(eval echo "{0..$index}")
+  do
+    aws ec2 detach-volume --volume-id ${volumes[$i]}
+    aws ec2 delete-volume --volume-id ${volumes[$i]} 
+  done
+}
+
+delete-instances() {
+  local instances=( $(list-instances|cut -f1|tr "\n" " ") )
+  local index=${#instances[@]}
+  let index-=1
+
+  for i in $(eval echo "{0..$index}")
+  do
+    aws ec2 terminate-instances --instance-id ${instances[$i]}
+  done
+}
+
+list-keys() {
+  aws ec2 describe-key-pairs | jq --arg word "$RESOURCE_PREFIX" -r '.KeyPairs[]|select(.KeyName|contains($word))|.KeyName'
+}
+
+cleanup-keys() {
+  local keys=( $(list-keys|tr "\n" " ") )
+  local index=${#keys[@]}
+  let index-=1
+
+  read -p "All Key Pairs starting with prefix: "$RESOURCE_PREFIX", will be deleted, press Ctl-C to cancel, Enter to continue:"
+
+  for i in $(eval echo "{0..$index}")
+  do
+    echo ${keys[$i]}
+    aws ec2 delete-key-pair --key-name ${keys[$i]}
+  done
+}
+
+set-volumes-delete-on-termination() {
+  # Reference: https://www.petewilcock.com/how-to-modify-deletion-on-termination-flag-for-ebs-volume-on-running-ec2-instance/
+  local instances=( $(list-instances|grep worker|cut -f1|tr "\n" " ") )
+  local index=${#instances[@]}
+  let index-=1
+
+  for i in $(eval echo "{0..$index}")
+  do
+      echo "${instances[$i]}"
+      aws ec2 modify-instance-attribute --instance-id ${instances[$i]} --block-device-mappings "[{\"DeviceName\": \"/dev/sdf\",\"Ebs\":{\"DeleteOnTermination\":true}}]"
+  done
+
+}
+
+cleanup-s3() {
+  local target="s3://backupstore-for-testing"
+  # aws s3 ls $target --recursive
+  aws s3 rm --recursive $target
+}
+
+# Script begin here
+
+[ $# -lt 1 ] && ( echo "Please enter something or try help" && exit 1 )
+
+$@
