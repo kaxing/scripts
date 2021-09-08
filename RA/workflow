@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 
-NUMBER_OF_NODE=7
+NUMBER_OF_NODE=11
 
 echo "Make sure \$KUBECONFIG is point to the target cluster: $KUBECONFIG"
 echo "Current context: $(kubectl config current-context)"
+
+sleep 3
 
 ./myaws prerequisite-check
 
 ./myaws wait-for-cluster $NUMBER_OF_NODE
 
-sleep 30
+sleep 21
 
 ./myaws create-volumes
 
@@ -17,10 +19,13 @@ sleep 30
 
 ./myaws set-volumes-delete-on-termination
 
+echo "EBS volume will begin creating soon, please make sure the new EBS disk is at right path, eg.: nvme1n1"
+echo 7
+
 ./auto-mount.exp
 
 echo "Install longhorn master with customized data path"
 # kubectl apply -Rf ./path-to-the-modified/longhorn.yaml
 
 # label the first node as worker node-1
-kubectl label nodes $(kubectl get nodes|grep worker|sort|head -1|cut -d' ' -f1) node=worker-1
+# kubectl label nodes $(kubectl get nodes|grep worker|sort|head -1|cut -d' ' -f1) node=worker-1

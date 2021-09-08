@@ -4,7 +4,7 @@
 
 set nodes [exec bash -c "kubectl get nodes --no-headers|grep worker|cut -d' ' -f1|tr '\n' ' ' " ]
 
-set commands { mountpoint /mnt/nvme1n1/ && echo "YES AND BYE" && exit 1 || mkfs.ext4 -F /dev/nvme1n1 && mkdir /mnt/nvme1n1 ; sed -i '/nvme1n1/d' /etc/fstab && blkid /dev/nvme1n1 && echo "UUID=$(lsblk -o NAME,FSTYPE,UUID | grep nvme1n1 | awk '{print $3}')    /mnt/nvme1n1    ext4    defaults,nofail    0  2" >> /etc/fstab && mount -av || (echo "SOMETHING WRONG" && exit 1 ) && ls -l /mnt/nvme1n1/lost+found ; exit }
+set commands { mountpoint /mnt/nvme1n1/ && echo "YES AND BYE" && exit 1 || mkfs.ext4 -F /dev/nvme1n1 && mkdir /mnt/nvme1n1 ; sed -i '/nvme1n1/d' /etc/fstab && (until blkid /dev/nvme1n1 ;do echo watiting ; done) && echo "UUID=$(lsblk -o NAME,FSTYPE,UUID | grep nvme1n1 | awk '{print $3}')    /mnt/nvme1n1    ext4    defaults,nofail    0  2" >> /etc/fstab && mount -av || (echo "SOMETHING WRONG" && exit 1 ) && ls -l /mnt/nvme1n1/lost+found ; exit }
 
 set timeout -1
 # expect timeout default is 10, -1 is forever, crtl-c can interrupt

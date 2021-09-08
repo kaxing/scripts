@@ -16,7 +16,7 @@ export AWS_PAGER=""
 RESOURCE_PREFIX="ra"
 
 # - EBS volume settings
-RA_PROFILE='small'
+RA_PROFILE='big'
 volume_availability_zone="ap-southeast-2a"
 case $RA_PROFILE in
   rt)
@@ -68,7 +68,7 @@ wait-for-cluster() {
     echo "$(kubectl get nodes|grep worker|grep Ready|wc -l|tr -d ' ') ready.. waiting..." && sleep 1
   done
 
-  echo "Done waiting.. nodes are proably ready for work..."
+  echo "Done waiting.. nodes are probably ready for work..."
 }
 
 
@@ -100,7 +100,7 @@ create-volumes() {
   for i in $(eval echo "{1..$index}")
   do
     aws ec2 create-volume --volume-type $volume_type --size $volume_size --iops $volume_iops  --throughput $volume_throughput --availability-zone $volume_availability_zone \
-      --tag-specifications 'ResourceType=volume,Tags=[{Key=Name,Value=Volume-'"$i"'},{Key=longhorn,Value=qa}]' 
+      --tag-specifications 'ResourceType=volume,Tags=[{Key=Name,Value='"$RESOURCE_PREFIX"'-Volume-'"$i"'},{Key=longhorn,Value=qa}]' 
   done
 }
 
